@@ -113,13 +113,32 @@ pub fn proxy_service(addr: &str, proxy_addr: &str) -> Service<ProxyApp> {
 #[derive(Parser, Debug)]
 #[command(author, version, about = "A TCP reverse proxy built with pingora")]
 struct Args {
-    /// Address to listen on (e.g., "0.0.0.0:8787")
-    #[arg(short, long)]
-    listen_addr: Option<String>,
+    /// Proxy mappings in format "listen_addr:proxy_addr" (e.g., "0.0.0.0:8787:127.0.0.1:22")
+    /// Can be specified multiple times for multiple mappings
+    #[arg(short, long, value_parser = parse_proxy_mapping)]
+    proxy: Vec<ProxyMapping>,
+}
 
-    /// Address to proxy to (e.g., "127.0.0.1:22")
-    #[arg(short, long)]
-    proxy_addr: Option<String>,
+#[derive(Debug, Clone)]
+struct ProxyMapping {
+    listen_addr: String,
+    proxy_addr: String,
+}
+
+// Parser for the proxy mapping argument
+fn parse_proxy_mapping(s: &str) -> Result<ProxyMapping, String> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 4 {
+        return Err("Invalid proxy mapping format. Expected format: listen_ip:listen_port:proxy_ip:proxy_port".to_string());
+    }
+
+    let listen_addr = format!("{}:{}", parts[0], parts[1]);
+    let proxy_addr = format!("{}:{}", parts[2], parts[3]);
+
+    Ok(ProxyMapping {
+        listen_addr,
+        proxy_addr,
+    })
 }
 
 fn main() {
@@ -127,26 +146,27 @@ fn main() {
     
     let args = Args::parse();
     
-    // Check if both addresses are provided, if not show usage and exit
-    let (listen_addr, proxy_addr) = match (args.listen_addr, args.proxy_addr) {
-        (Some(l), Some(p)) => (l, p),
-        _ => {
-            let mut cmd = Args::command();
-            cmd.print_help().unwrap();
-            std::process::exit(1);
-        }
-    };
+    // Check if at least one proxy mapping is provided
+    if args.proxy.is_empty() {
+        let mut cmd = Args::command();
+        cmd.print_help().unwrap();
+        std::process::exit(1);
+    }
+    let proxy_count = args.proxy.len();
     
-    // let opt = Some(Opt::parse_args());
     let opt = Some(Opt::default());
     let mut server = Server::new(opt).unwrap();
     server.bootstrap();
     
-    let proxy = proxy_service(&listen_addr, &proxy_addr);
-    server.add_service(proxy);
+    // Add a service for each proxy mapping
+    for mapping in args.proxy {
+        let proxy = proxy_service(&mapping.listen_addr, &mapping.proxy_addr);
+        server.add_service(proxy);
+        
+        info!("Adding proxy mapping - listening on {}, proxying to {}", 
+              mapping.listen_addr, mapping.proxy_addr);
+    }
     
-    info!("Starting proxy server - listening on {}, proxying to {}", 
-          listen_addr, proxy_addr);
-    
+    info!("Starting proxy server with {} mappings", proxy_count);
     server.run_forever();
 }
