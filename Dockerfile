@@ -13,4 +13,4 @@ FROM debian:bullseye-slim
 
 COPY --from=builder /pj/target/release/pj /usr/local/bin/pj
 
-CMD ["pj", "--help"]
+CMD ["pj"]
