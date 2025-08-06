@@ -28,10 +28,11 @@ pub struct ConnectionInfo {
     pub proxy_addr: String,
     pub backend_addr: String,
     pub start_instant: Instant,
+    pub active_connections: u64,
 }
 
 impl ConnectionInfo {
-    pub fn new(client_addr: SocketAddr, proxy_addr: &str, backend_addr: &str) -> Self {
+    pub fn new(client_addr: SocketAddr, proxy_addr: &str, backend_addr: &str, active_connections: u64) -> Self {
         let id = CONNECTION_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
         Self {
             id,
@@ -39,27 +40,30 @@ impl ConnectionInfo {
             proxy_addr: proxy_addr.to_string(),
             backend_addr: backend_addr.to_string(),
             start_instant: Instant::now(),
+            active_connections,
         }
     }
 
     pub fn log_start(&self) {
         info!(
-            "Connection #{} established: {} -> {} -> {}",
+            "Conn #{} estab [{}]: {} -> {} -> {}",
             self.id,
+            self.active_connections,
             self.client_addr,
             self.proxy_addr,
             self.backend_addr
         );
     }
 
-    pub fn log_end(&self, bytes_sent: u64, bytes_received: u64, error: Option<&str>) {
+    pub fn log_end(&self, bytes_sent: u64, bytes_received: u64, error: Option<&str>, remaining_connections: u64) {
         let duration = self.start_instant.elapsed();
-        let status = if error.is_some() { "failed" } else { "closed" };
+        let status = if error.is_some() { "fail " } else { "close" };
         
         info!(
-            "Connection #{} {} | Duration: {:.2}s | Sent: {} | Received: {}{}",
+            "Conn #{} {} [{}]: Duration: {:.2}s | Sent: {} | Received: {}{}",
             self.id,
             status,
+            remaining_connections,
             duration.as_secs_f64(),
             format_bytes(bytes_sent),
             format_bytes(bytes_received),

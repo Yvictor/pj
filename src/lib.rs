@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::select;
 use tracing::{debug, warn};
@@ -21,6 +22,7 @@ pub struct ProxyApp {
     client_connector: TransportConnector,
     proxy_to: BasicPeer,
     listen_addr: String,
+    active_connections: Arc<AtomicU64>,
 }
 
 enum DuplexEvent {
@@ -34,10 +36,11 @@ impl ProxyApp {
             client_connector: TransportConnector::new(None),
             proxy_to,
             listen_addr,
+            active_connections: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    pub async fn duplex(&self, mut server_session: Stream, mut client_session: Stream, conn_info: ConnectionInfo) {
+    pub async fn duplex(&self, mut server_session: Stream, mut client_session: Stream, conn_info: ConnectionInfo, active_connections: Arc<AtomicU64>) {
         let mut upstream_buf = [0; 1024];
         let mut downstream_buf = [0; 1024];
         let mut stats = ConnectionStats::new();
@@ -54,6 +57,8 @@ impl ProxyApp {
                         Ok(n) => event = DuplexEvent::DownstreamRead(n),
                         Err(e) => {
                             warn!("Downstream read error: {}", e);
+                            let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                            conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()), remaining);
                             return;
                         }
                     }
@@ -63,6 +68,8 @@ impl ProxyApp {
                         Ok(n) => event = DuplexEvent::UpstreamRead(n),
                         Err(e) => {
                             warn!("Upstream read error: {}", e);
+                            let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                            conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()), remaining);
                             return;
                         }
                     }
@@ -71,24 +78,28 @@ impl ProxyApp {
             match event {
                 DuplexEvent::DownstreamRead(0) => {
                     debug!("Downstream session closing");
-                    conn_info.log_end(stats.bytes_sent, stats.bytes_received, None);
+                    let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                    conn_info.log_end(stats.bytes_sent, stats.bytes_received, None, remaining);
                     return;
                 }
                 DuplexEvent::UpstreamRead(0) => {
                     debug!("Upstream session closing");
-                    conn_info.log_end(stats.bytes_sent, stats.bytes_received, None);
+                    let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                    conn_info.log_end(stats.bytes_sent, stats.bytes_received, None, remaining);
                     return;
                 }
                 DuplexEvent::DownstreamRead(n) => {
                     stats.add_received(n);
                     if let Err(e) = client_session.write_all(&upstream_buf[0..n]).await {
                         warn!("Failed to write to client session: {}", e);
-                        conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()));
+                        let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                        conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()), remaining);
                         return;
                     }
                     if let Err(e) = client_session.flush().await {
                         warn!("Failed to flush client session: {}", e);
-                        conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()));
+                        let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                        conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()), remaining);
                         return;
                     }
                 }
@@ -96,12 +107,14 @@ impl ProxyApp {
                     stats.add_sent(n);
                     if let Err(e) = server_session.write_all(&downstream_buf[0..n]).await {
                         warn!("Failed to write to server session: {}", e);
-                        conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()));
+                        let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                        conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()), remaining);
                         return;
                     }
                     if let Err(e) = server_session.flush().await {
                         warn!("Failed to flush server session: {}", e);
-                        conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()));
+                        let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                        conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()), remaining);
                         return;
                     }
                 }
@@ -137,13 +150,17 @@ impl ServerApp for ProxyApp {
 
         match client_session {
             Ok(client_session) => {
+                // Increment active connections counter
+                let current_connections = self.active_connections.fetch_add(1, Ordering::Relaxed) + 1;
+                
                 let conn_info = ConnectionInfo::new(
                     client_socket_addr,
                     &self.listen_addr,
-                    &self.proxy_to._address.to_string()
+                    &self.proxy_to._address.to_string(),
+                    current_connections
                 );
                 
-                self.duplex(io, client_session, conn_info).await;
+                self.duplex(io, client_session, conn_info, self.active_connections.clone()).await;
                 None
             }
             Err(e) => {
