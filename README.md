@@ -4,6 +4,8 @@ A TCP reverse proxy built with pingora
 
 ## Usage
 
+### Command Line Arguments
+
 ```bash
 # Single proxy
 pj --proxy 0.0.0.0:8787:127.0.0.1:22
@@ -18,6 +20,31 @@ pj \
 pj --help
 ```
 
+### Environment Variables
+
+You can also configure proxy mappings using environment variables:
+
+```bash
+# Single proxy mapping
+export PJ_PROXY="0.0.0.0:8787:127.0.0.1:22"
+pj
+
+# Multiple proxy mappings (comma or semicolon separated)
+export PJ_PROXIES="0.0.0.0:8787:127.0.0.1:22,0.0.0.0:8080:127.0.0.1:80"
+pj
+
+# Or using semicolons
+export PJ_PROXIES="0.0.0.0:8787:127.0.0.1:22;0.0.0.0:8080:127.0.0.1:80;0.0.0.0:8443:127.0.0.1:443"
+pj
+```
+
+**Priority Order:**
+1. Command line arguments (highest priority)
+2. `PJ_PROXIES` environment variable (for multiple mappings)
+3. `PJ_PROXY` environment variable (for single mapping)
+
+If command line arguments are provided, environment variables are ignored.
+
 ## Options
 
 ```
@@ -26,6 +53,10 @@ Options:
                         Can be specified multiple times for multiple mappings
   -h, --help           Print help
   -V, --version        Print version
+
+Environment Variables:
+  PJ_PROXY    Single proxy mapping (same format as --proxy)
+  PJ_PROXIES  Multiple proxy mappings, comma or semicolon separated
 ```
 
 ## Examples
@@ -43,6 +74,18 @@ Options:
 3. Docker container proxy:
    ```bash
    pj --proxy 0.0.0.0:8080:172.17.0.2:80
+   ```
+
+4. Using environment variables:
+   ```bash
+   # Single proxy
+   PJ_PROXY="0.0.0.0:8787:127.0.0.1:22" pj
+   
+   # Multiple proxies
+   PJ_PROXIES="0.0.0.0:8787:127.0.0.1:22,0.0.0.0:8080:127.0.0.1:80" pj
+   
+   # In Docker
+   docker run -e PJ_PROXY="0.0.0.0:8080:backend:80" -p 8080:8080 pj:latest
    ```
 
 ## Building from Source
@@ -150,7 +193,11 @@ version: '3'
 services:
   tcp-proxy:
     image: pj:latest
+    # Option 1: Using command line arguments
     command: --proxy 0.0.0.0:8787:backend:22 --proxy 0.0.0.0:8080:backend:80
+    # Option 2: Using environment variables (uncomment to use)
+    # environment:
+    #   - PJ_PROXIES=0.0.0.0:8787:backend:22,0.0.0.0:8080:backend:80
     ports:
       - "8787:8787"
       - "8080:8080"
@@ -191,14 +238,14 @@ Contributions are welcome! Please ensure:
   - Ensure no panics in production
 
 ### Phase 2: Observability
-- [ ] **Connection Logging**: Display connection information
+- [x] **Connection Logging**: Display connection information
   - Log client IP addresses
   - Log destination addresses
   - Connection timestamps
   - Connection duration
   - Bytes transferred
   - Connection status (success/failure)
-  - Format: `[timestamp] client_ip:port -> proxy:port -> backend:port [status]`
+  - Format: `[timestamp] Connection #ID established/closed: client_ip:port -> proxy:port -> backend:port | Duration: Xs | Sent: X bytes | Received: X bytes`
 
 ### Phase 3: Load Balancing
 - [ ] **Load Balancing**: Support multiple backends for a single listening port

@@ -13,11 +13,14 @@ use pingora_core::services::listening::Service;
 use pingora_core::upstreams::peer::BasicPeer;
 
 pub mod error;
+pub mod connection;
 pub use error::{ProxyError, Result};
+use connection::{ConnectionInfo, ConnectionStats};
 
 pub struct ProxyApp {
     client_connector: TransportConnector,
     proxy_to: BasicPeer,
+    listen_addr: String,
 }
 
 enum DuplexEvent {
@@ -26,16 +29,20 @@ enum DuplexEvent {
 }
 
 impl ProxyApp {
-    pub fn new(proxy_to: BasicPeer) -> Self {
+    pub fn new(proxy_to: BasicPeer, listen_addr: String) -> Self {
         ProxyApp {
             client_connector: TransportConnector::new(None),
             proxy_to,
+            listen_addr,
         }
     }
 
-    pub async fn duplex(&self, mut server_session: Stream, mut client_session: Stream) {
+    pub async fn duplex(&self, mut server_session: Stream, mut client_session: Stream, conn_info: ConnectionInfo) {
         let mut upstream_buf = [0; 1024];
         let mut downstream_buf = [0; 1024];
+        let mut stats = ConnectionStats::new();
+        
+        conn_info.log_start();
         
         loop {
             let downstream_read = server_session.read(&mut upstream_buf);
@@ -64,29 +71,37 @@ impl ProxyApp {
             match event {
                 DuplexEvent::DownstreamRead(0) => {
                     debug!("Downstream session closing");
+                    conn_info.log_end(stats.bytes_sent, stats.bytes_received, None);
                     return;
                 }
                 DuplexEvent::UpstreamRead(0) => {
                     debug!("Upstream session closing");
+                    conn_info.log_end(stats.bytes_sent, stats.bytes_received, None);
                     return;
                 }
                 DuplexEvent::DownstreamRead(n) => {
+                    stats.add_received(n);
                     if let Err(e) = client_session.write_all(&upstream_buf[0..n]).await {
                         warn!("Failed to write to client session: {}", e);
+                        conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()));
                         return;
                     }
                     if let Err(e) = client_session.flush().await {
                         warn!("Failed to flush client session: {}", e);
+                        conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()));
                         return;
                     }
                 }
                 DuplexEvent::UpstreamRead(n) => {
+                    stats.add_sent(n);
                     if let Err(e) = server_session.write_all(&downstream_buf[0..n]).await {
                         warn!("Failed to write to server session: {}", e);
+                        conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()));
                         return;
                     }
                     if let Err(e) = server_session.flush().await {
                         warn!("Failed to flush server session: {}", e);
+                        conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()));
                         return;
                     }
                 }
@@ -102,15 +117,37 @@ impl ServerApp for ProxyApp {
         io: Stream,
         _shutdown: &ShutdownWatch,
     ) -> Option<Stream> {
+        // Try to get client address from the stream's socket digest
+        let client_socket_addr = {
+            use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+            
+            io.get_socket_digest()
+                .and_then(|digest| digest.peer_addr.get().cloned())
+                .and_then(|opt_addr| opt_addr)
+                .and_then(|addr| {
+                    addr.as_inet().map(|inet| {
+                        let ip = IpAddr::from(inet.ip().to_canonical());
+                        SocketAddr::new(ip, inet.port())
+                    })
+                })
+                .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0))
+        };
+        
         let client_session = self.client_connector.new_stream(&self.proxy_to).await;
 
         match client_session {
             Ok(client_session) => {
-                self.duplex(io, client_session).await;
+                let conn_info = ConnectionInfo::new(
+                    client_socket_addr,
+                    &self.listen_addr,
+                    &self.proxy_to._address.to_string()
+                );
+                
+                self.duplex(io, client_session, conn_info).await;
                 None
             }
             Err(e) => {
-                debug!("Failed to create client session: {}", e);
+                warn!("Failed to create client session to {}: {}", self.proxy_to._address, e);
                 None
             }
         }
@@ -123,7 +160,7 @@ pub fn proxy_service(addr: &str, proxy_addr: &str) -> Service<ProxyApp> {
     Service::with_listeners(
         "Proxy Service".to_string(),
         Listeners::tcp(addr),
-        ProxyApp::new(proxy_to),
+        ProxyApp::new(proxy_to, addr.to_string()),
     )
 }
 
@@ -205,9 +242,11 @@ mod tests {
     #[test]
     fn test_proxy_app_creation() {
         let peer = BasicPeer::new("127.0.0.1:8080");
-        let proxy_app = ProxyApp::new(peer.clone());
+        let listen_addr = "0.0.0.0:8787".to_string();
+        let proxy_app = ProxyApp::new(peer.clone(), listen_addr.clone());
         
         assert_eq!(proxy_app.proxy_to._address, peer._address);
+        assert_eq!(proxy_app.listen_addr, listen_addr);
     }
 
     #[test]
