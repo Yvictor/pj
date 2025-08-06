@@ -3,7 +3,8 @@ static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 use clap::{CommandFactory, Parser};
 use pingora_core::server::{configuration::Opt, Server};
-use tracing::info;
+use std::process;
+use tracing::{error, info};
 
 use pj::{parse_proxy_mapping, proxy_service, ProxyMapping};
 
@@ -23,13 +24,22 @@ fn main() {
     
     if args.proxy.is_empty() {
         let mut cmd = Args::command();
-        cmd.print_help().unwrap();
-        std::process::exit(1);
+        if let Err(e) = cmd.print_help() {
+            eprintln!("Failed to print help: {}", e);
+        }
+        process::exit(1);
     }
     let proxy_count = args.proxy.len();
     
     let opt = Some(Opt::default());
-    let mut server = Server::new(opt).unwrap();
+    let mut server = match Server::new(opt) {
+        Ok(server) => server,
+        Err(e) => {
+            error!("Failed to create server: {}", e);
+            process::exit(1);
+        }
+    };
+    
     server.bootstrap();
     
     for mapping in args.proxy {

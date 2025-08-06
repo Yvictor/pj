@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::select;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use pingora_core::apps::ServerApp;
 use pingora_core::connectors::TransportConnector;
@@ -11,6 +11,9 @@ use pingora_core::protocols::Stream;
 use pingora_core::server::ShutdownWatch;
 use pingora_core::services::listening::Service;
 use pingora_core::upstreams::peer::BasicPeer;
+
+pub mod error;
+pub use error::{ProxyError, Result};
 
 pub struct ProxyApp {
     client_connector: TransportConnector,
@@ -39,30 +42,53 @@ impl ProxyApp {
             let upstream_read = client_session.read(&mut downstream_buf);
             let event: DuplexEvent;
             select! {
-                n = downstream_read => event
-                    = DuplexEvent::DownstreamRead(n.unwrap()),
-                n = upstream_read => event
-                    = DuplexEvent::UpstreamRead(n.unwrap()),
+                n = downstream_read => {
+                    match n {
+                        Ok(n) => event = DuplexEvent::DownstreamRead(n),
+                        Err(e) => {
+                            warn!("Downstream read error: {}", e);
+                            return;
+                        }
+                    }
+                }
+                n = upstream_read => {
+                    match n {
+                        Ok(n) => event = DuplexEvent::UpstreamRead(n),
+                        Err(e) => {
+                            warn!("Upstream read error: {}", e);
+                            return;
+                        }
+                    }
+                }
             }
             match event {
                 DuplexEvent::DownstreamRead(0) => {
-                    debug!("downstream session closing");
+                    debug!("Downstream session closing");
                     return;
                 }
                 DuplexEvent::UpstreamRead(0) => {
-                    debug!("upstream session closing");
+                    debug!("Upstream session closing");
                     return;
                 }
                 DuplexEvent::DownstreamRead(n) => {
-                    client_session.write_all(&upstream_buf[0..n]).await.unwrap();
-                    client_session.flush().await.unwrap();
+                    if let Err(e) = client_session.write_all(&upstream_buf[0..n]).await {
+                        warn!("Failed to write to client session: {}", e);
+                        return;
+                    }
+                    if let Err(e) = client_session.flush().await {
+                        warn!("Failed to flush client session: {}", e);
+                        return;
+                    }
                 }
                 DuplexEvent::UpstreamRead(n) => {
-                    server_session
-                        .write_all(&downstream_buf[0..n])
-                        .await
-                        .unwrap();
-                    server_session.flush().await.unwrap();
+                    if let Err(e) = server_session.write_all(&downstream_buf[0..n]).await {
+                        warn!("Failed to write to server session: {}", e);
+                        return;
+                    }
+                    if let Err(e) = server_session.flush().await {
+                        warn!("Failed to flush server session: {}", e);
+                        return;
+                    }
                 }
             }
         }
@@ -107,7 +133,7 @@ pub struct ProxyMapping {
     pub proxy_addr: String,
 }
 
-pub fn parse_proxy_mapping(s: &str) -> Result<ProxyMapping, String> {
+pub fn parse_proxy_mapping(s: &str) -> std::result::Result<ProxyMapping, String> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 4 {
         return Err("Invalid proxy mapping format. Expected format: listen_ip:listen_port:proxy_ip:proxy_port".to_string());
@@ -133,7 +159,7 @@ mod tests {
         let result = parse_proxy_mapping(input);
         
         assert!(result.is_ok());
-        let mapping = result.unwrap();
+        let mapping = result.expect("Failed to parse valid mapping");
         assert_eq!(mapping.listen_addr, "127.0.0.1:8080");
         assert_eq!(mapping.proxy_addr, "192.168.1.1:9090");
     }
@@ -144,7 +170,7 @@ mod tests {
         let result = parse_proxy_mapping(input);
         
         assert!(result.is_ok());
-        let mapping = result.unwrap();
+        let mapping = result.expect("Failed to parse localhost mapping");
         assert_eq!(mapping.listen_addr, "localhost:8080");
         assert_eq!(mapping.proxy_addr, "localhost:9090");
     }
@@ -155,7 +181,7 @@ mod tests {
         let result = parse_proxy_mapping(input);
         
         assert!(result.is_ok());
-        let mapping = result.unwrap();
+        let mapping = result.expect("Failed to parse zeros mapping");
         assert_eq!(mapping.listen_addr, "0.0.0.0:80");
         assert_eq!(mapping.proxy_addr, "10.0.0.1:8080");
     }
