@@ -1,9 +1,8 @@
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
-
-static CONNECTION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+use crate::id_manager::ConnectionIdManager;
 
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -32,8 +31,14 @@ pub struct ConnectionInfo {
 }
 
 impl ConnectionInfo {
-    pub fn new(client_addr: SocketAddr, proxy_addr: &str, backend_addr: &str, active_connections: u64) -> Self {
-        let id = CONNECTION_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    pub fn new(
+        client_addr: SocketAddr, 
+        proxy_addr: &str, 
+        backend_addr: &str, 
+        active_connections: u64,
+        id_manager: &Arc<ConnectionIdManager>
+    ) -> Self {
+        let id = id_manager.next_id();
         Self {
             id,
             client_addr,

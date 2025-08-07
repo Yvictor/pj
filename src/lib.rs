@@ -15,14 +15,17 @@ use pingora_core::upstreams::peer::BasicPeer;
 
 pub mod error;
 pub mod connection;
+pub mod id_manager;
 pub use error::{ProxyError, Result};
 use connection::{ConnectionInfo, ConnectionStats};
+use id_manager::ConnectionIdManager;
 
 pub struct ProxyApp {
     client_connector: TransportConnector,
     proxy_to: BasicPeer,
     listen_addr: String,
     active_connections: Arc<AtomicU64>,
+    id_manager: Arc<ConnectionIdManager>,
 }
 
 enum DuplexEvent {
@@ -31,12 +34,13 @@ enum DuplexEvent {
 }
 
 impl ProxyApp {
-    pub fn new(proxy_to: BasicPeer, listen_addr: String) -> Self {
+    pub fn new(proxy_to: BasicPeer, listen_addr: String, id_manager: Arc<ConnectionIdManager>) -> Self {
         ProxyApp {
             client_connector: TransportConnector::new(None),
             proxy_to,
             listen_addr,
             active_connections: Arc::new(AtomicU64::new(0)),
+            id_manager,
         }
     }
 
@@ -157,7 +161,8 @@ impl ServerApp for ProxyApp {
                     client_socket_addr,
                     &self.listen_addr,
                     &self.proxy_to._address.to_string(),
-                    current_connections
+                    current_connections,
+                    &self.id_manager
                 );
                 
                 self.duplex(io, client_session, conn_info, self.active_connections.clone()).await;
@@ -171,13 +176,13 @@ impl ServerApp for ProxyApp {
     }
 }
 
-pub fn proxy_service(addr: &str, proxy_addr: &str) -> Service<ProxyApp> {
+pub fn proxy_service(addr: &str, proxy_addr: &str, id_manager: Arc<ConnectionIdManager>) -> Service<ProxyApp> {
     let proxy_to = BasicPeer::new(proxy_addr);
 
     Service::with_listeners(
         "Proxy Service".to_string(),
         Listeners::tcp(addr),
-        ProxyApp::new(proxy_to, addr.to_string()),
+        ProxyApp::new(proxy_to, addr.to_string(), id_manager),
     )
 }
 
@@ -260,7 +265,8 @@ mod tests {
     fn test_proxy_app_creation() {
         let peer = BasicPeer::new("127.0.0.1:8080");
         let listen_addr = "0.0.0.0:8787".to_string();
-        let proxy_app = ProxyApp::new(peer.clone(), listen_addr.clone());
+        let id_manager = Arc::new(ConnectionIdManager::new(None, None));
+        let proxy_app = ProxyApp::new(peer.clone(), listen_addr.clone(), id_manager);
         
         assert_eq!(proxy_app.proxy_to._address, peer._address);
         assert_eq!(proxy_app.listen_addr, listen_addr);
@@ -270,8 +276,9 @@ mod tests {
     fn test_proxy_service_creation() {
         let listen_addr = "127.0.0.1:8000";
         let proxy_addr = "127.0.0.1:9000";
+        let id_manager = Arc::new(ConnectionIdManager::new(None, None));
         
-        let service = proxy_service(listen_addr, proxy_addr);
+        let service = proxy_service(listen_addr, proxy_addr, id_manager);
         
         assert_eq!(service.name(), "Proxy Service");
     }

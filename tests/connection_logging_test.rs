@@ -62,9 +62,9 @@ async fn test_connection_logging_basic() {
     println!("Proxy output:\n{}", combined_output);
     
     // Verify log contains connection information
-    assert!(combined_output.contains("Connection #"), 
+    assert!(combined_output.contains("Conn #"), 
             "Should log connection info");
-    assert!(combined_output.contains("established") || combined_output.contains("Adding proxy mapping"), 
+    assert!(combined_output.contains("estab") || combined_output.contains("Adding proxy mapping"), 
             "Should log connection establishment or proxy setup");
     assert!(combined_output.contains(&proxy_listen_addr), "Should log proxy address");
     assert!(combined_output.contains(&echo_server_addr), "Should log backend address");
@@ -139,9 +139,9 @@ async fn test_connection_logging_with_stats() {
     println!("Proxy output:\n{}", combined_output);
     
     // Verify stats in logs
-    assert!(combined_output.contains("Connection #"), "Should log connection info");
-    assert!(combined_output.contains("established"), "Should log connection establishment");
-    assert!(combined_output.contains("closed") || combined_output.contains("failed"), 
+    assert!(combined_output.contains("Conn #"), "Should log connection info");
+    assert!(combined_output.contains("estab"), "Should log connection establishment");
+    assert!(combined_output.contains("close") || combined_output.contains("fail"), 
             "Should log connection close status");
     assert!(combined_output.contains("Duration:"), "Should log connection duration");
     assert!(combined_output.contains("Sent:") && combined_output.contains("Received:"), 
@@ -273,11 +273,11 @@ async fn test_multiple_connections_logging() {
     println!("Proxy output:\n{}", combined_output);
     
     // Count connection logs
-    let connection_count = combined_output.matches("Connection #").count();
+    let connection_count = combined_output.matches("Conn #").count();
     assert!(connection_count >= 3, "Should log at least 3 connections, found {}", connection_count);
     
     // Should have unique connection IDs
-    assert!(combined_output.contains("Connection #0"), "Should have connection 0");
-    assert!(combined_output.contains("Connection #1"), "Should have connection 1");
-    assert!(combined_output.contains("Connection #2"), "Should have connection 2");
+    assert!(combined_output.contains("Conn #0"), "Should have connection 0");
+    assert!(combined_output.contains("Conn #1"), "Should have connection 1");
+    assert!(combined_output.contains("Conn #2"), "Should have connection 2");
 }

@@ -5,9 +5,11 @@ use clap::{CommandFactory, Parser};
 use pingora_core::server::{configuration::Opt, Server};
 use std::env;
 use std::process;
+use std::sync::Arc;
 use tracing::{error, info};
 
 use pj::{parse_proxy_mapping, proxy_service, ProxyMapping};
+use pj::id_manager::{ConnectionIdManager, parse_duration, parse_count};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -24,6 +26,16 @@ use pj::{parse_proxy_mapping, proxy_service, ProxyMapping};
                 PJ_LOG=pj=trace - Trace logging for pj module only
                 PJ_LOG=warn,pj=info - Warn globally, info for pj
               Note: Falls back to RUST_LOG if PJ_LOG is not set
+  
+  PJ_CONN_ID_RESET_INTERVAL  Time interval for connection ID reset
+              Format: [number][unit] (d=days, h=hours, m=minutes, s=seconds)
+              Default: None (no reset by time)
+              Examples: 6h, 30m, 1d, 1d12h
+  
+  PJ_CONN_ID_RESET_COUNT     Count threshold for connection ID reset
+              Format: number or with units (k=thousand, m=million, g=billion)
+              Default: None (no reset by count)
+              Examples: 100k, 10m, 1g, 500000
 
 EXAMPLES:
   # Using command line arguments
@@ -34,7 +46,10 @@ EXAMPLES:
   PJ_PROXIES=\"0.0.0.0:8787:127.0.0.1:22,0.0.0.0:8080:127.0.0.1:80\" pj
   
   # With custom logging level
-  PJ_LOG=debug pj --proxy 0.0.0.0:8787:127.0.0.1:22"
+  PJ_LOG=debug pj --proxy 0.0.0.0:8787:127.0.0.1:22
+  
+  # With connection ID reset settings
+  PJ_CONN_ID_RESET_INTERVAL=6h PJ_CONN_ID_RESET_COUNT=100k pj --proxy 0.0.0.0:8787:127.0.0.1:22"
 )]
 struct Args {
     /// Proxy mapping in format "listen_ip:listen_port:proxy_ip:proxy_port"
@@ -111,6 +126,48 @@ fn main() {
     
     let proxy_count = proxy_mappings.len();
     
+    // Parse connection ID reset settings from environment variables
+    let reset_interval = env::var("PJ_CONN_ID_RESET_INTERVAL")
+        .ok()
+        .and_then(|s| {
+            match parse_duration(&s) {
+                Ok(duration) => {
+                    info!("Connection ID reset interval: {}", s);
+                    Some(duration)
+                }
+                Err(e) => {
+                    error!("Invalid PJ_CONN_ID_RESET_INTERVAL '{}': {}", s, e);
+                    None
+                }
+            }
+        });
+    
+    let reset_count = env::var("PJ_CONN_ID_RESET_COUNT")
+        .ok()
+        .and_then(|s| {
+            match parse_count(&s) {
+                Ok(count) => {
+                    info!("Connection ID reset count threshold: {}", s);
+                    Some(count)
+                }
+                Err(e) => {
+                    error!("Invalid PJ_CONN_ID_RESET_COUNT '{}': {}", s, e);
+                    None
+                }
+            }
+        });
+    
+    // Log reset configuration
+    match (reset_interval, reset_count) {
+        (None, None) => info!("Connection ID reset disabled (no reset interval or count threshold set)"),
+        (Some(_), None) => info!("Connection ID reset by time interval only"),
+        (None, Some(_)) => info!("Connection ID reset by count threshold only"),
+        (Some(_), Some(_)) => info!("Connection ID reset by time interval or count threshold"),
+    }
+    
+    // Create shared ID manager
+    let id_manager = Arc::new(ConnectionIdManager::new(reset_interval, reset_count));
+    
     let opt = Some(Opt::default());
     let mut server = match Server::new(opt) {
         Ok(server) => server,
@@ -123,7 +180,7 @@ fn main() {
     server.bootstrap();
     
     for mapping in proxy_mappings {
-        let proxy = proxy_service(&mapping.listen_addr, &mapping.proxy_addr);
+        let proxy = proxy_service(&mapping.listen_addr, &mapping.proxy_addr, id_manager.clone());
         server.add_service(proxy);
         
         info!("Adding proxy mapping - listening on {}, proxying to {}", 
