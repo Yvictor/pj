@@ -10,6 +10,7 @@ use tracing::{error, info};
 
 use pj::{parse_proxy_mapping, proxy_service, ProxyMapping};
 use pj::id_manager::{ConnectionIdManager, parse_duration, parse_count};
+use pj::telemetry::{init_telemetry, TelemetryConfig};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -21,35 +22,43 @@ use pj::id_manager::{ConnectionIdManager, parse_duration, parse_count};
   PJ_PROXIES  Multiple proxy mappings, comma or semicolon separated
   PJ_LOG      Set logging level (error, warn, info, debug, trace)
               Default: info
-              Examples: 
+              Examples:
                 PJ_LOG=debug - Enable debug logging for all modules
                 PJ_LOG=pj=trace - Trace logging for pj module only
                 PJ_LOG=warn,pj=info - Warn globally, info for pj
               Note: Falls back to RUST_LOG if PJ_LOG is not set
-  
+
   PJ_CONN_ID_RESET_INTERVAL  Time interval for connection ID reset
               Format: [number][unit] (d=days, h=hours, m=minutes, s=seconds)
               Default: None (no reset by time)
               Examples: 6h, 30m, 1d, 1d12h
-  
+
   PJ_CONN_ID_RESET_COUNT     Count threshold for connection ID reset
               Format: number or with units (k=thousand, m=million, g=billion)
               Default: None (no reset by count)
               Examples: 100k, 10m, 1g, 500000
 
+  PJ_OTLP_ENDPOINT  OpenTelemetry OTLP endpoint for traces and metrics
+              Default: None (telemetry disabled)
+              Examples: http://localhost:4317 (gRPC)
+              For Grafana Cloud: https://otlp-gateway-<region>.grafana.net/otlp
+
 EXAMPLES:
   # Using command line arguments
   pj --proxy 0.0.0.0:8787:127.0.0.1:22
-  
+
   # Using environment variables
   PJ_PROXY=\"0.0.0.0:8787:127.0.0.1:22\" pj
   PJ_PROXIES=\"0.0.0.0:8787:127.0.0.1:22,0.0.0.0:8080:127.0.0.1:80\" pj
-  
+
   # With custom logging level
   PJ_LOG=debug pj --proxy 0.0.0.0:8787:127.0.0.1:22
-  
+
   # With connection ID reset settings
-  PJ_CONN_ID_RESET_INTERVAL=6h PJ_CONN_ID_RESET_COUNT=100k pj --proxy 0.0.0.0:8787:127.0.0.1:22"
+  PJ_CONN_ID_RESET_INTERVAL=6h PJ_CONN_ID_RESET_COUNT=100k pj --proxy 0.0.0.0:8787:127.0.0.1:22
+
+  # With OpenTelemetry export to Grafana stack
+  PJ_OTLP_ENDPOINT=http://localhost:4317 pj --proxy 0.0.0.0:8787:127.0.0.1:22"
 )]
 struct Args {
     /// Proxy mapping in format "listen_ip:listen_port:proxy_ip:proxy_port"
@@ -59,17 +68,23 @@ struct Args {
 }
 
 fn main() {
-    // Initialize tracing with PJ_LOG (fallback to RUST_LOG) environment variable support
+    // Initialize telemetry with PJ_LOG (fallback to RUST_LOG) environment variable support
     // Default to "info" if neither is set
-    let filter = env::var("PJ_LOG")
+    let log_filter = env::var("PJ_LOG")
         .or_else(|_| env::var("RUST_LOG"))
         .unwrap_or_else(|_| "info".to_string());
-    
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::new(filter)
-        )
-        .init();
+
+    let otlp_endpoint = env::var("PJ_OTLP_ENDPOINT").ok();
+
+    let telemetry_config = TelemetryConfig {
+        otlp_endpoint,
+        log_filter,
+    };
+
+    if let Err(e) = init_telemetry(telemetry_config) {
+        eprintln!("Failed to initialize telemetry: {}", e);
+        process::exit(1);
+    }
     
     let args = Args::parse();
     

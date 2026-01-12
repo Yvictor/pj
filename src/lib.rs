@@ -1,9 +1,10 @@
 use async_trait::async_trait;
+use opentelemetry::KeyValue;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::select;
-use tracing::{debug, warn};
+use tracing::{debug, warn, info_span, Instrument};
 
 use pingora_core::apps::ServerApp;
 use pingora_core::connectors::TransportConnector;
@@ -16,9 +17,11 @@ use pingora_core::upstreams::peer::BasicPeer;
 pub mod error;
 pub mod connection;
 pub mod id_manager;
+pub mod telemetry;
 pub use error::{ProxyError, Result};
 use connection::{ConnectionInfo, ConnectionStats};
 use id_manager::ConnectionIdManager;
+use telemetry::get_metrics;
 
 pub struct ProxyApp {
     client_connector: TransportConnector,
@@ -48,9 +51,15 @@ impl ProxyApp {
         let mut upstream_buf = [0; 1024];
         let mut downstream_buf = [0; 1024];
         let mut stats = ConnectionStats::new();
-        
+
+        let metrics = get_metrics();
+        let labels = [
+            KeyValue::new("listen_addr", conn_info.proxy_addr.clone()),
+            KeyValue::new("backend_addr", conn_info.backend_addr.clone()),
+        ];
+
         conn_info.log_start();
-        
+
         loop {
             let downstream_read = server_session.read(&mut upstream_buf);
             let upstream_read = client_session.read(&mut downstream_buf);
@@ -62,6 +71,7 @@ impl ProxyApp {
                         Err(e) => {
                             warn!("Downstream read error: {}", e);
                             let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                            self.record_connection_end(&conn_info, &stats, &metrics, &labels, remaining);
                             conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()), remaining);
                             return;
                         }
@@ -73,6 +83,7 @@ impl ProxyApp {
                         Err(e) => {
                             warn!("Upstream read error: {}", e);
                             let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                            self.record_connection_end(&conn_info, &stats, &metrics, &labels, remaining);
                             conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()), remaining);
                             return;
                         }
@@ -83,12 +94,14 @@ impl ProxyApp {
                 DuplexEvent::DownstreamRead(0) => {
                     debug!("Downstream session closing");
                     let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                    self.record_connection_end(&conn_info, &stats, &metrics, &labels, remaining);
                     conn_info.log_end(stats.bytes_sent, stats.bytes_received, None, remaining);
                     return;
                 }
                 DuplexEvent::UpstreamRead(0) => {
                     debug!("Upstream session closing");
                     let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                    self.record_connection_end(&conn_info, &stats, &metrics, &labels, remaining);
                     conn_info.log_end(stats.bytes_sent, stats.bytes_received, None, remaining);
                     return;
                 }
@@ -97,12 +110,14 @@ impl ProxyApp {
                     if let Err(e) = client_session.write_all(&upstream_buf[0..n]).await {
                         warn!("Failed to write to client session: {}", e);
                         let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                        self.record_connection_end(&conn_info, &stats, &metrics, &labels, remaining);
                         conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()), remaining);
                         return;
                     }
                     if let Err(e) = client_session.flush().await {
                         warn!("Failed to flush client session: {}", e);
                         let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                        self.record_connection_end(&conn_info, &stats, &metrics, &labels, remaining);
                         conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()), remaining);
                         return;
                     }
@@ -112,18 +127,35 @@ impl ProxyApp {
                     if let Err(e) = server_session.write_all(&downstream_buf[0..n]).await {
                         warn!("Failed to write to server session: {}", e);
                         let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                        self.record_connection_end(&conn_info, &stats, &metrics, &labels, remaining);
                         conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()), remaining);
                         return;
                     }
                     if let Err(e) = server_session.flush().await {
                         warn!("Failed to flush server session: {}", e);
                         let remaining = active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+                        self.record_connection_end(&conn_info, &stats, &metrics, &labels, remaining);
                         conn_info.log_end(stats.bytes_sent, stats.bytes_received, Some(&e.to_string()), remaining);
                         return;
                     }
                 }
             }
         }
+    }
+
+    fn record_connection_end(
+        &self,
+        conn_info: &ConnectionInfo,
+        stats: &ConnectionStats,
+        metrics: &telemetry::ProxyMetrics,
+        labels: &[KeyValue],
+        remaining: u64,
+    ) {
+        let duration = conn_info.start_instant.elapsed();
+        metrics.bytes_sent_total.add(stats.bytes_sent, labels);
+        metrics.bytes_received_total.add(stats.bytes_received, labels);
+        metrics.connection_duration_seconds.record(duration.as_secs_f64(), labels);
+        metrics.connections_active.record(remaining as i64, labels);
     }
 }
 
@@ -137,7 +169,7 @@ impl ServerApp for ProxyApp {
         // Try to get client address from the stream's socket digest
         let client_socket_addr = {
             use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-            
+
             io.get_socket_digest()
                 .and_then(|digest| digest.peer_addr.get().cloned())
                 .and_then(|opt_addr| opt_addr)
@@ -149,14 +181,14 @@ impl ServerApp for ProxyApp {
                 })
                 .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0))
         };
-        
+
         let client_session = self.client_connector.new_stream(&self.proxy_to).await;
 
         match client_session {
             Ok(client_session) => {
                 // Increment active connections counter
                 let current_connections = self.active_connections.fetch_add(1, Ordering::Relaxed) + 1;
-                
+
                 let conn_info = ConnectionInfo::new(
                     client_socket_addr,
                     &self.listen_addr,
@@ -164,8 +196,28 @@ impl ServerApp for ProxyApp {
                     current_connections,
                     &self.id_manager
                 );
-                
-                self.duplex(io, client_session, conn_info, self.active_connections.clone()).await;
+
+                // Record metrics
+                let metrics = get_metrics();
+                let labels = [
+                    KeyValue::new("listen_addr", self.listen_addr.clone()),
+                    KeyValue::new("backend_addr", self.proxy_to._address.to_string()),
+                ];
+                metrics.connections_total.add(1, &labels);
+                metrics.connections_active.record(current_connections as i64, &labels);
+
+                // Create a span for tracing this connection
+                let span = info_span!(
+                    "proxy_connection",
+                    conn_id = conn_info.id,
+                    client_addr = %client_socket_addr,
+                    listen_addr = %self.listen_addr,
+                    backend_addr = %self.proxy_to._address,
+                );
+
+                self.duplex(io, client_session, conn_info, self.active_connections.clone())
+                    .instrument(span)
+                    .await;
                 None
             }
             Err(e) => {
