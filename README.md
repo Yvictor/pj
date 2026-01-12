@@ -45,6 +45,29 @@ pj
 
 If command line arguments are provided, environment variables are ignored.
 
+### OpenTelemetry Configuration
+
+Enable OpenTelemetry for traces and metrics export to Grafana stack:
+
+```bash
+# Export to local OTLP collector (Tempo/Prometheus)
+PJ_OTLP_ENDPOINT=http://localhost:4317 pj --proxy 0.0.0.0:8787:127.0.0.1:22
+
+# Export to Grafana Cloud
+PJ_OTLP_ENDPOINT=https://otlp-gateway-prod-us-east-0.grafana.net/otlp pj --proxy 0.0.0.0:8787:127.0.0.1:22
+```
+
+**Exported Metrics:**
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pj_connections_total` | Counter | Total connections established |
+| `pj_connections_active` | Gauge | Currently active connections |
+| `pj_bytes_sent_total` | Counter | Total bytes sent to clients |
+| `pj_bytes_received_total` | Counter | Total bytes received from clients |
+| `pj_connection_duration_seconds` | Histogram | Connection duration |
+
+All metrics include `listen_addr` and `backend_addr` labels.
+
 ## Options
 
 ```
@@ -55,8 +78,12 @@ Options:
   -V, --version        Print version
 
 Environment Variables:
-  PJ_PROXY    Single proxy mapping (same format as --proxy)
-  PJ_PROXIES  Multiple proxy mappings, comma or semicolon separated
+  PJ_PROXY              Single proxy mapping (same format as --proxy)
+  PJ_PROXIES            Multiple proxy mappings, comma or semicolon separated
+  PJ_LOG                Log level (error, warn, info, debug, trace). Default: info
+  PJ_OTLP_ENDPOINT      OTLP endpoint for OpenTelemetry export (e.g., http://localhost:4317)
+  PJ_CONN_ID_RESET_INTERVAL  Reset connection ID after interval (e.g., 6h, 1d)
+  PJ_CONN_ID_RESET_COUNT     Reset connection ID after count (e.g., 100k, 1m)
 ```
 
 ## Examples
@@ -256,7 +283,7 @@ Contributions are welcome! Please ensure:
   - Configuration format: `--proxy "0.0.0.0:8080:backend1:80,backend2:80,backend3:80"`
 
 ### Future Enhancements
-- [ ] **Metrics & Monitoring**: Add Prometheus metrics endpoint
+- [x] **Metrics & Monitoring**: OpenTelemetry support with OTLP export for Grafana stack
 - [ ] **Configuration File**: Support YAML/TOML configuration files
 - [ ] **Hot Reload**: Reload configuration without downtime
 - [ ] **TLS/SSL Support**: Add support for encrypted connections
