@@ -16,6 +16,7 @@ use tracing_subscriber::EnvFilter;
 const SERVICE_NAME: &str = "pj-proxy";
 
 static METRICS: OnceLock<ProxyMetrics> = OnceLock::new();
+static OTEL_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 pub struct ProxyMetrics {
     pub connections_total: Counter<u64>,
@@ -122,9 +123,24 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<(), Box<dyn std::error:
 
     match &config.otlp_endpoint {
         Some(endpoint) => {
-            // Initialize OpenTelemetry with OTLP export
-            let tracer_provider = init_tracer_provider(endpoint)?;
-            let meter_provider = init_meter_provider(endpoint)?;
+            // Create a dedicated tokio runtime for OpenTelemetry
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?;
+
+            // Initialize OpenTelemetry within the runtime context
+            let endpoint_clone = endpoint.clone();
+            let (tracer_provider, meter_provider) = rt.block_on(async {
+                let tracer_provider = init_tracer_provider(&endpoint_clone)
+                    .map_err(|e| format!("Failed to init tracer: {}", e))?;
+                let meter_provider = init_meter_provider(&endpoint_clone)
+                    .map_err(|e| format!("Failed to init meter: {}", e))?;
+                Ok::<_, Box<dyn std::error::Error>>((tracer_provider, meter_provider))
+            })?;
+
+            // Store the runtime to keep it alive
+            let _ = OTEL_RUNTIME.set(rt);
 
             // Set global providers
             global::set_tracer_provider(tracer_provider.clone());
